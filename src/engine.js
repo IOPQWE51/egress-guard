@@ -15,6 +15,22 @@
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 分类器说的是它自己那套标准动作名，引擎用的是内部动作名。
+ * 默认给一份翻译表 —— 别指望每个 profile 作者都会记得写 actionMap。
+ *
+ * 这个默认值是后来补的：之前只有 `profile.actionMap?.[choice] || choice`，
+ * 而分类器固定吐 switch_node / wait_retry / alert_only / retry_same，
+ * 于是每一句模型判断都落进「未知动作」分支被降级成 retry —— 分类器接了个寂寞。
+ * 规则层一直工作，把这事盖住了，直到拿 --simulate 跑全流程演练才露出来。
+ */
+const DEFAULT_ACTION_MAP = {
+  switch_node: 'switch',
+  wait_retry: 'wait',
+  alert_only: 'alert',
+  retry_same: 'retry',
+};
+
 function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }) {
   const S = cfg.schedule;
 
@@ -88,7 +104,7 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
       };
     }
 
-    const mapped = profile.actionMap?.[c.choice] || c.choice;
+    const mapped = profile.actionMap?.[c.choice] || DEFAULT_ACTION_MAP[c.choice] || c.choice;
     const okAction = ['ok', 'switch', 'wait', 'retry', 'alert'].includes(mapped);
     if (!okAction) {
       log.warn(`分类器给出未知 action "${c.choice}"，按保守策略`);

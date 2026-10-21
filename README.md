@@ -444,6 +444,30 @@ POST <classifier.url>
 
 想换任何兼容这个协议的服务，改 `classifier.url` / `classifier.model` 即可。
 
+### 动作名要翻译一下（这个坑很隐蔽）
+
+分类器吐的是它自己的标准动作名，引擎用的是内部动作名：
+
+| 分类器输出 | 引擎动作 |
+|---|---|
+| `switch_node` | `switch` |
+| `wait_retry` | `wait` |
+| `alert_only` | `alert` |
+| `retry_same` | `retry` |
+
+引擎内置了这份默认翻译表，profile 里写 `actionMap` 可以覆盖。
+
+**第一版没有默认表**，代码是 `profile.actionMap?.[choice] || choice`，
+而 profile 里又没人写 `actionMap` —— 于是每一句模型判断都落进「未知动作」分支，
+被降级成保守的 `retry`。分类器接了个寂寞。
+
+它一直没被发现，是因为**规则层一直在正常工作**，把所有已知错误形态都提前接住了，
+根本轮不到分类器出场。直到拿 `--simulate` 跑了一遍完整流程演练，才看见那行
+`分类器给出未知 action "alert_only"`。
+
+教训：**兜底层要单独演练。** 平时被上层盖得严严实实的代码路径，
+不主动走一遍就永远是「看起来接好了」。
+
 ---
 
 ## 限制
