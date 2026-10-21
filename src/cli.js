@@ -89,7 +89,7 @@ function build() {
   if (profile.group && !argOf('--group')) cfg.mihomo.group = profile.group;
 
   const mihomo = createMihomo(cfg, logger);
-  const store = createStore(cfg, logger);
+  const store = createStore(cfg, logger, { readOnly: has('--dry-run') });
   const notifier = createNotifier(cfg, logger);
   const classifier = createClassifier(cfg, profile, logger);
   const engine = createEngine({ cfg, profile, log: logger, mihomo, store, classifier, notifier });

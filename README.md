@@ -171,13 +171,17 @@ journalctl -u egress-guard -f
 ```bash
 node src/cli.js --loop             # 常驻
 node src/cli.js --once             # 探一次，打印完整判断
-node src/cli.js --dry-run          # 走完流程但不切节点、不推送
+node src/cli.js --dry-run          # 走完流程但不切节点、不推送、不写状态
 node src/cli.js --simulate         # 假定探针失败，演练切换
 node src/cli.js --status           # 生效配置 + 运行状态
 node src/cli.js --nodes            # 组内节点 + 冷却情况
 node src/cli.js --selftest         # 规则自测（纯本地，不联网）
 node src/cli.js --test-notify      # 测通知通道
 ```
+
+> `--dry-run` 是**只读**的：冷却照算、告警照打印，但不落盘、不切节点。
+> 这条也踩过 —— 最早 `--dry-run` 会真的把 `allDeadUntil` 写进状态文件，
+> 于是跑一次演练，生产守护就跟着「全挂静默 30 分钟」了。演练把生产演练停了你敢信。
 
 常用参数：
 

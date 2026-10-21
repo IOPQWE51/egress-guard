@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 
-function createStore(cfg, log) {
+function createStore(cfg, log, opts = {}) {
   const file = cfg.stateFile;
   fs.mkdirSync(path.dirname(file), { recursive: true });
 
@@ -25,7 +25,11 @@ function createStore(cfg, log) {
     }
   }
 
+  // readOnly 给 --dry-run 用：照常算冷却、照常打印，但一个字都不落盘。
+  // 不加这个的时候，跑一次 --dry-run 演练会留下真实的 allDeadUntil，
+  // 守护随后「全挂静默 30 分钟」—— 演练把生产给演练停了。
   function save(s) {
+    if (opts.readOnly) return;
     fs.writeFileSync(file, JSON.stringify(s, null, 2));
   }
 
