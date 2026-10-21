@@ -1,6 +1,6 @@
 {
   "name": "egress-guard",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Watch an LLM gateway's upstream failures, decide whether the egress node is at fault, and rotate a mihomo proxy group accordingly.",
   "type": "commonjs",
   "main": "src/cli.js",

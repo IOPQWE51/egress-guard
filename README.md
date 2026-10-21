@@ -311,10 +311,10 @@ module.exports = {
 所以 profile 可以声明备选条件：
 
 ```js
-primaryLabel: 'deepseek-v4.1-flash-free',
+primaryLabel: 'deepseek-x-flash-free',
 variants: [
-  { id: 'mimo', label: 'mimo-v2.6-flash-free',
-    probe: ({ cfg }) => probe({ cfg, model: 'mimo-v2.6-flash-free' }) },
+  { id: 'mimo', label: 'mimo-x-flash-free',
+    probe: ({ cfg }) => probe({ cfg, model: 'mimo-x-flash-free' }) },
 ],
 ```
 
