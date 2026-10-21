@@ -303,6 +303,175 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
 
   // ---------- 候选节点 ----------
 
+  // ---------- 额度轮换 ----------
+  //
+  // 背景：很多免费额度是「按出口 IP 每天一份」。select 组同一时刻只有一个节点在干活，
+  // 于是那一个 IP 吃光一整天的量，组里其它 IP 的额度一天都没动过 —— 明明有 11 个 IP，
+  // 用得上的只有一个。轮换就是把它摊开：健康的时候每个时间片换一个。
+
+  let lastTrafficAt = 0;
+
+  /** 业务流量心跳。cli 把 Docker 日志流的每条数据喂进来，用来判断「现在是不是空窗期」。 */
+  function noteTraffic(ts = Date.now()) {
+    lastTrafficAt = ts;
+  }
+
+  const rotCfg = () => cfg.schedule.rotation || {};
+
+  /**
+   * 选下一个轮换目标：**最久没用过的**优先。
+   *
+   * 这里不能复用 candidatePool()——那是「优先级靠前的排前面」，拿它轮换会在前两个
+   * 节点之间反复横跳，后面一排 IP 永远轮不到，等于没改。
+   */
+  function pickRotationTarget(state, group, current) {
+    const now = Date.now();
+    const pool = (group?.all || []).filter(
+      (n) => n !== current && (state.cooldown[n] || 0) <= now
+    );
+    if (!pool.length) return null;
+    return pool
+      .slice()
+      .sort((a, b) => (state.lastUsed?.[a] || 0) - (state.lastUsed?.[b] || 0))[0];
+  }
+
+  function shouldRotate(state, decision) {
+    const r = rotCfg();
+    if (!r.enabled) return false;
+    // 只在「这轮探针是好的」时轮换。坏了走正常的切换逻辑，别两套逻辑抢着换。
+    if (!decision || decision.action !== 'ok') return false;
+    const now = Date.now();
+    if ((state.allDeadUntil || 0) > now) return false;
+    if (now - (state.rotatedAt || 0) < (r.minGapMs ?? 300000)) return false;
+    if (now - (state.rotatedAt || 0) < (r.intervalMs ?? 1800000)) return false;
+    // 有业务流量在跑就先别换：换 IP 会把上游的 prompt cache 全部作废
+    if (r.idleMs && now - lastTrafficAt < r.idleMs) return false;
+    return true;
+  }
+
+  async function rotate(state, group, current, { dryRun = false } = {}) {
+    const target = pickRotationTarget(state, group, current);
+    if (!target) {
+      log.info('额度轮换：没有可用候选（都在冷却或组里只有它一个），跳过');
+      return null;
+    }
+    if (dryRun) {
+      log.info(`[dry-run] 本应轮换 "${current}" → "${target}"`);
+      return { rotated: false, from: current, to: target, dryRun: true };
+    }
+    if (!(await mihomo.selectNode(target))) {
+      log.warn(`额度轮换到 "${target}" 失败，保持 "${current}"`);
+      return null;
+    }
+    state.rotatedAt = Date.now();
+    state.current = target;
+    state.lastUsed = state.lastUsed || {};
+    state.lastUsed[current] = Date.now();
+    state.lastUsed[target] = Date.now();
+    store.save(state);
+    log.info(`额度轮换："${current}" → "${target}"（每个出口 IP 每天一份额度，摊开用）`);
+    if (rotCfg().notify) {
+      await notifier.send(`🔁 出口轮换\n${current} → ${target}\n（把每天的免费额度摊到多个 IP 上）`, { dryRun });
+    }
+    return { rotated: true, from: current, to: target };
+  }
+
+  /**
+   * 轮换逻辑自测：纯内存，不联网、不碰 mihomo。返回 [{name, ok, detail}]。
+   * 规则层能靠 profile.selftest 自测，轮换在引擎里，就自己带一套。
+   */
+  function selftestRotation() {
+    const out = [];
+    const t = (name, fn) => {
+      try {
+        const r = fn();
+        out.push({ name, ok: r.ok, detail: r.detail });
+      } catch (e) {
+        out.push({ name, ok: false, detail: e.message });
+      }
+    };
+    const now = Date.now();
+    const group = { now: 'A', all: ['A', 'B', 'C', 'D'] };
+    const saveRot = cfg.schedule.rotation;
+    const saveTraffic = lastTrafficAt;
+
+    t('LRU 选最久没用的', () => {
+      const st = { cooldown: {}, lastUsed: { A: now, B: now - 1000, C: now - 2000, D: now - 3000 } };
+      const got = pickRotationTarget(st, group, 'A');
+      return { ok: got === 'D', detail: `选中 ${got}，期望 D` };
+    });
+
+    t('冷却中的跳过', () => {
+      const st = { cooldown: { D: now + 3600000 }, lastUsed: { A: now, B: now - 1000, C: now - 2000, D: now - 3000 } };
+      const got = pickRotationTarget(st, group, 'A');
+      return { ok: got === 'C', detail: `选中 ${got}，期望 C` };
+    });
+
+    t('全都冷却则放弃', () => {
+      const st = { cooldown: { B: now + 9e9, C: now + 9e9, D: now + 9e9 }, lastUsed: {} };
+      const got = pickRotationTarget(st, group, 'A');
+      return { ok: got === null, detail: `返回 ${got}，期望 null` };
+    });
+
+    t('不会选回当前节点', () => {
+      const st = { cooldown: { B: now + 9e9, C: now + 9e9, D: now + 9e9 }, lastUsed: {} };
+      const got = pickRotationTarget(st, group, 'A');
+      return { ok: got === null || got !== 'A', detail: `返回 ${got}` };
+    });
+
+    t('开关关着不轮换', () => {
+      cfg.schedule.rotation = { ...saveRot, enabled: false };
+      const ok = shouldRotate({ rotatedAt: 0, allDeadUntil: 0 }, { action: 'ok' });
+      cfg.schedule.rotation = saveRot;
+      return { ok: ok === false, detail: `shouldRotate=${ok}` };
+    });
+
+    t('刚轮换过不重复轮换', () => {
+      cfg.schedule.rotation = { ...saveRot, enabled: true, intervalMs: 1800000, idleMs: 0 };
+      const ok = shouldRotate({ rotatedAt: Date.now() - 60000, allDeadUntil: 0 }, { action: 'ok' });
+      cfg.schedule.rotation = saveRot;
+      return { ok: ok === false, detail: `shouldRotate=${ok}` };
+    });
+
+    t('有业务流量时不动', () => {
+      cfg.schedule.rotation = { ...saveRot, enabled: true, intervalMs: 1000, minGapMs: 0, idleMs: 120000 };
+      lastTrafficAt = Date.now();
+      const ok = shouldRotate({ rotatedAt: 0, allDeadUntil: 0 }, { action: 'ok' });
+      cfg.schedule.rotation = saveRot;
+      lastTrafficAt = saveTraffic;
+      return { ok: ok === false, detail: `shouldRotate=${ok}` };
+    });
+
+    t('探针失败时不轮换', () => {
+      cfg.schedule.rotation = { ...saveRot, enabled: true, intervalMs: 1000, minGapMs: 0, idleMs: 0 };
+      const ok = shouldRotate({ rotatedAt: 0, allDeadUntil: 0 }, { action: 'switch' });
+      cfg.schedule.rotation = saveRot;
+      return { ok: ok === false, detail: `shouldRotate=${ok}` };
+    });
+
+    t('到点且空闲则轮换', () => {
+      cfg.schedule.rotation = { ...saveRot, enabled: true, intervalMs: 1000, minGapMs: 0, idleMs: 0 };
+      lastTrafficAt = 0;
+      const ok = shouldRotate({ rotatedAt: 0, allDeadUntil: 0 }, { action: 'ok' });
+      cfg.schedule.rotation = saveRot;
+      lastTrafficAt = saveTraffic;
+      return { ok: ok === true, detail: `shouldRotate=${ok}` };
+    });
+
+    return out;
+  }
+
+  /** 手动立刻轮换一次（cli --rotate 用）。 */
+  async function rotateNow({ dryRun = false } = {}) {
+    const state = store.load();
+    const group = await mihomo.readGroup();
+    if (!group || !group.now) {
+      log.error(`读不到 mihomo 组 "${cfg.mihomo.group}"，无法轮换`);
+      return { rotated: false, reason: 'no-group' };
+    }
+    return await rotate(state, group, group.now, { dryRun });
+  }
+
   function candidatePool(group) {
     const priority = cfg.nodes?.priority || profile.priority || [];
     const all = group.all || [];
@@ -433,6 +602,21 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
           log.info(`主用条件仍未恢复（status=${prim.status}），继续用备选，${Math.round(S.rehabIntervalMs / 60000)} 分钟后再试`);
         }
 
+        // LRU 记账：这个节点刚被用过，下次轮换排后面
+        state.lastUsed = state.lastUsed || {};
+        state.lastUsed[current] = Date.now();
+
+        // 额度轮换（见 schedule.rotation）。放在探针刚成功之后是有讲究的：
+        // 那一刻是最接近「空窗」的时机，换 IP 对上游 prompt cache 的伤害最小。
+        if (shouldRotate(state, decision)) {
+          const r = await rotate(state, group, current, { dryRun });
+          if (r?.rotated) {
+            const after = await mihomo.readGroup();
+            await rehabSweep(state, after || group);
+            return { action: 'ok', current: r.to, obs, decision, rotation: r };
+          }
+        }
+
         await rehabSweep(state, group);
         return { action: 'ok', current, obs, decision };
       }
@@ -525,7 +709,10 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
   }
 
   return {
-    runOnce, probeOnce, probeConfirmed, decide, confirm, matchRule, pickCandidates, candidatePool,
+    runOnce,
+    rotateNow,
+    noteTraffic,
+    selftestRotation, probeOnce, probeConfirmed, decide, confirm, matchRule, pickCandidates, candidatePool,
     variantLabel, activeVariant: (state) => state.variant || null,
   };
 }

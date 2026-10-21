@@ -101,6 +101,15 @@ function build() {
   return { cfg, profile, profileName, mihomo, store, notifier, classifier, engine };
 }
 
+function nextRotationIn(state) {
+  const r = CFG_ROTATION;
+  if (!r?.enabled) return null;
+  const due = (state.rotatedAt || 0) + (r.intervalMs || 0);
+  return Math.max(0, Math.round((due - Date.now()) / 1000));
+}
+
+let CFG_ROTATION = null;
+
 // ---------- 命令 ----------
 
 async function main() {
@@ -120,6 +129,7 @@ async function main() {
         '  --nodes          列出组内节点与冷却情况',
         '  --selftest       规则层自测（不联网）',
         '  --test-notify    测试通知通道',
+        '  --rotate         立刻轮换到「最久没用过」的节点（额度摊开用）',
         '',
         '选项：',
         '  --profile <名>   指定 profiles/ 下的 profile（默认取 config 里的 profile）',
@@ -130,16 +140,23 @@ async function main() {
   }
 
   // 没给任何命令时默认 --once（试跑最常用），别直接报"未知命令"
-  const COMMANDS = ['--loop', '--once', '--dry-run', '--simulate', '--status', '--nodes', '--selftest', '--test-notify'];
+  const COMMANDS = ['--loop', '--once', '--dry-run', '--simulate', '--status', '--nodes', '--selftest', '--test-notify', '--rotate'];
   if (!COMMANDS.some((c) => has(c))) {
     argv.push('--once');
   }
 
   const { cfg, profile, profileName, mihomo, store, notifier, classifier, engine } = build();
+  CFG_ROTATION = cfg.schedule.rotation || null;
 
   if (has('--test-notify')) {
     const ok = await notifier.send('✅ 通知通道连通性测试');
     console.log('结果：', ok);
+    return;
+  }
+
+  if (has('--rotate')) {
+    const r = await engine.rotateNow({ dryRun: has('--dry-run') });
+    console.log('RESULT:', JSON.stringify(r));
     return;
   }
 
@@ -160,6 +177,14 @@ async function main() {
             notify: cfg.notify.enabled ? 'on' : 'off',
             logWatch: cfg.logwatch.enabled ? cfg.logwatch.container : 'off',
             variantEscalateAfter: cfg.schedule.variantEscalateAfter,
+            rotation: cfg.schedule.rotation?.enabled
+              ? `每 ${Math.round((cfg.schedule.rotation.intervalMs || 0) / 60000)} 分钟`
+              : 'off',
+          },
+          rotation: {
+            lastRotatedAt: state.rotatedAt || 0,
+            nextRotationInSec: nextRotationIn(state),
+            lastUsed: state.lastUsed || {},
           },
           condition: {
             current: engine.variantLabel(state.variant || null),
@@ -187,7 +212,9 @@ async function main() {
       const until = state.cooldown[n] || 0;
       const left = until > Date.now() ? `冷却 ${Math.ceil((until - Date.now()) / 60000)}min` : '可用';
       const fails = state.fails[n] ? `（连败 ${state.fails[n]}）` : '';
-      console.log(`${n === group.now ? '▶' : ' '} ${left.padEnd(14)} ${n}${fails}`);
+      const lu = state.lastUsed?.[n];
+      const used = lu ? `上次使用 ${Math.round((Date.now() - lu) / 60000)}min 前` : '还没用过';
+      console.log(`${n === group.now ? '▶' : ' '} ${left.padEnd(14)} ${n}${fails}  [${used}]`);
     }
     return;
   }
@@ -206,8 +233,18 @@ async function main() {
       if (ok) pass++;
       console.log(`${ok ? '✅' : '❌'} ${String(c.name).padEnd(16)} → ${d.action.padEnd(7)} 期望 ${c.expect}  [${d.source}]`);
     }
-    console.log(`\n${pass}/${cases.length} 通过`);
-    process.exitCode = pass === cases.length ? 0 : 1;
+    // 轮换逻辑在引擎里，不在 profile 里，单独跑一套
+    const rot = engine.selftestRotation ? engine.selftestRotation() : [];
+    if (rot.length) {
+      console.log('\n— 额度轮换 —');
+      for (const c of rot) {
+        if (c.ok) pass++;
+        console.log(`${c.ok ? '✅' : '❌'} ${String(c.name).padEnd(16)} ${c.detail}`);
+      }
+    }
+    const total = cases.length + rot.length;
+    console.log(`\n${pass}/${total} 通过`);
+    process.exitCode = pass === total ? 0 : 1;
     return;
   }
 
@@ -222,12 +259,19 @@ async function main() {
     logger.info(
       `启动（profile=${profileName}, 组=${cfg.mihomo.group}, 间隔=${cfg.probe.intervalMs / 1000}s, ` +
         `超时=${cfg.probe.timeoutMs / 1000}s, 分类器=${classifier.enabled ? cfg.classifier.model : '关'}, ` +
-        `退避=${cfg.schedule.cooldownBaseMs / 60000}min→${cfg.schedule.cooldownMaxMs / 3600000}h）`
+        `退避=${cfg.schedule.cooldownBaseMs / 60000}min→${cfg.schedule.cooldownMaxMs / 3600000}h, ` +
+        `轮换=${cfg.schedule.rotation?.enabled ? Math.round(cfg.schedule.rotation.intervalMs / 60000) + 'min' : '关'}）`
     );
 
-    const watcher = createLogWatcher(cfg, profile, () => {
-      engine.runOnce().catch((e) => logger.error('事件检查异常：' + e.message));
-    }, logger);
+    const watcher = createLogWatcher(
+      cfg,
+      profile,
+      () => {
+        engine.runOnce().catch((e) => logger.error('事件检查异常：' + e.message));
+      },
+      logger,
+      () => engine.noteTraffic()
+    );
     watcher.start();
 
     await engine.runOnce();

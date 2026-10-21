@@ -13,7 +13,7 @@
 
 const http = require('http');
 
-function createLogWatcher(cfg, profile, onHit, log) {
+function createLogWatcher(cfg, profile, onHit, log, onTraffic) {
   const { enabled, dockerSocket, container } = cfg.logwatch;
   const patterns = profile.logPatterns || [];
 
@@ -26,6 +26,7 @@ function createLogWatcher(cfg, profile, onHit, log) {
   }
 
   let pending = false;
+  let lastBeat = 0;
 
   function fire(hit) {
     if (pending) return;
@@ -55,6 +56,12 @@ function createLogWatcher(cfg, profile, onHit, log) {
         res.on('data', (d) => {
           const s = carry + d.toString('utf8');
           carry = s.slice(-64);
+          // 心跳：任何一条容器输出都算「业务在跑」（节流到 2 秒一次，
+          // 只用来判断空窗期，不需要精确）
+          if (onTraffic && Date.now() - lastBeat > 2000) {
+            lastBeat = Date.now();
+            onTraffic();
+          }
           for (const p of patterns) {
             if (s.includes(p)) return fire(p);
           }
