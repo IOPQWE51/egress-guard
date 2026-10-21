@@ -216,6 +216,12 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
 
   function applyVariant(state) {
     const v = alts().find((x) => x.id === state.variant);
+    if (state.variant && !v) {
+      // profile 改过、备选被删了，别让状态文件里的旧 id 一直挂着
+      log.warn(`状态里的备选条件 "${state.variant}" 在 profile 里已经不存在，退回主条件`);
+      state.variant = null;
+      state.variantSince = 0;
+    }
     activeProbe = v ? v.probe : profile.probe;
     return activeProbe;
   }
