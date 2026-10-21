@@ -24,7 +24,7 @@ function createStore(cfg, log, opts = {}) {
       return {
         current: null, cooldown: {}, fails: {}, lastSwitchAt: 0,
         allDeadUntil: 0, quietUntil: 0, nextRehabAt: 0,
-        variant: null, variantSince: 0, globalFails: 0,
+        variant: null, variantSince: 0, globalFails: 0, allDeadNotified: false, groupSickNotified: false,
       };
     }
   }

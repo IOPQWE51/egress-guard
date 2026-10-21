@@ -384,7 +384,14 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
     }
     if (group.all.length < 3) {
       log.error(`组内只剩 ${group.all.length} 个节点，订阅可能失效或 filter 写错`);
-      await notifier.send(`🚨 代理组节点数异常\n${cfg.mihomo.group} 只剩 ${group.all.length} 个\n当前：${current}`, { dryRun });
+      // 同「全挂」：这种状态会一直维持，报一次就够，恢复了再说
+      if (!state.groupSickNotified) {
+        state.groupSickNotified = true;
+        await notifier.send(`🚨 代理组节点数异常\n${cfg.mihomo.group} 只剩 ${group.all.length} 个\n当前：${current}`, { dryRun });
+      }
+    } else if (state.groupSickNotified) {
+      state.groupSickNotified = false;
+      log.info(`组内节点数恢复为 ${group.all.length}，节点数告警解除`);
     }
 
     let obs = await probeConfirmed(current);
@@ -403,6 +410,14 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
       case 'ok': {
         store.succeed(state, current);
         state.globalFails = 0;
+
+        // 从「全挂」里爬出来了，报一声就够；没爬出来的时候下面都在压着不报
+        if (state.allDeadNotified) {
+          state.allDeadNotified = false;
+          store.save(state);
+          log.info(`已恢复（节点 "${current}" 可用），全挂告警解除`);
+          await notifier.send(`✅ 出口已恢复\n节点：${current}\n探针正常，可以正常用了。`, { dryRun });
+        }
         store.save(state);
 
         // 正跑在备选条件上：隔一段时间回头试试主条件，通了就切回去
@@ -458,9 +473,17 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
         const candidates = pickCandidates(state, group, [current]);
         if (!candidates.length) {
           state.allDeadUntil = Date.now() + S.allDeadMs;
+          const firstTime = !state.allDeadNotified;
+          state.allDeadNotified = true;
           store.save(state);
           log.error('没有可用候选节点，静默等待');
-          await notifier.send(`🚨 无可切换节点\n当前：${current}\n原因：${decision.reason}`, { dryRun });
+          // 全挂会持续很久（额度耗尽要等几小时）。只在「刚进入全挂」时推一次，
+          // 之后每 10 分钟推一次的，那不叫告警，那叫骚扰。
+          if (firstTime) {
+            await notifier.send(`🚨 全部节点暂时不可用\n当前：${current}\n原因：${decision.reason}\n（恢复后会再通知一次，中间不再打扰）`, { dryRun });
+          } else {
+            log.info('已处于全挂状态，本次不重复推送');
+          }
           return { action: 'all-dead', current, obs, decision };
         }
 
