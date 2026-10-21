@@ -168,6 +168,14 @@ sudo systemctl enable --now egress-guard
 journalctl -u egress-guard -f
 ```
 
+日志会一直长，记得配个轮转（**这条也踩了**：换新引擎时把老服务的 logrotate
+忘在旧路径上了，等想起来它已经在闷头写了几个小时）：
+
+```bash
+sudo cp logrotate/egress-guard /etc/logrotate.d/
+sudo logrotate -d /etc/logrotate.d/egress-guard   # 先 dry-run
+```
+
 ---
 
 ## 命令
@@ -594,7 +602,9 @@ profiles/
 config/
   config.example.json             配置模板
 systemd/
-  egress-guard.service            服务单元示例
+  egress-guard.service
+logrotate/
+  egress-guard            服务单元示例
 ```
 
 ---

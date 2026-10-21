@@ -1,0 +1,14 @@
+# 日志会长到多大取决于故障频率；5M × 3 份够用，也不至于把小结石盘吃满。
+#   sudo cp logrotate/egress-guard /etc/logrotate.d/egress-guard
+#   sudo logrotate -d /etc/logrotate.d/egress-guard   # 先 dry-run 看一遍
+#
+# 路径和 su 的用户按你自己的部署改。
+
+/home/ztxa1013/mihomo/egress-guard/state/guard.log {
+    size 5M
+    rotate 3
+    missingok
+    notifempty
+    copytruncate
+    su ztxa1013 ztxa1013
+}
