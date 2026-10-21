@@ -100,6 +100,25 @@ module.exports = {
       'What should the node guardian do?',
   },
 
+  /*
+   * 可选：切节点前的二次确认。
+   *
+   * 有些 429 是「你这个出口 IP 被限流了」，换节点能解；
+   * 有些 429 是「对面某个模型的端点挂了」，换节点白搭，还会把好节点一个个冻死。
+   * 光看状态码分不出来。这里的思路是：换一个条件再探一次。
+   *
+   *   通了   → 问题不在节点，改判 wait，不冻结节点
+   *   没通   → 才是节点的问题，照切
+   *
+   * 代价是多一次往返，换来的是不拿好节点去殉葬。
+   */
+  // crossCheck: {
+  //   label: '主模型 → 对照组模型',
+  //   onRules: ['rate-limit'],          // 只对拿不准的规则做
+  //   isOk: (r) => r.status === 200,
+  //   probe: ({ cfg }) => probe({ cfg, model: 'some-other-free-model' }),
+  // },
+
   logPatterns: ['ERROR 429', 'ERROR 403', 'rate limit'],
 
   selftest() {

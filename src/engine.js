@@ -107,6 +107,50 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
     return { action: mapped, source: 'classifier', confidence: c.confidence, reason: c.choice };
   }
 
+  /**
+   * 换节点前的二次确认。
+   *
+   * 有些失败看着像「这个节点坏了」，其实是上游/模型级故障 —— 最典型的是 429：
+   * 既可能是「这个出口 IP 被限流」（换节点能解），也可能是「对面某个模型端点挂了」（换节点白搭）。
+   * 光看状态码分不出来，正文文案也未必每次都带。
+   *
+   * 所以留一个 profile 钩子：换一个条件（换模型、换路径、换参数）再探一次。
+   * 换了条件就通了 → 问题跟这个节点无关，这次不切，省下一个好节点。
+   *
+   * 代价是多一次探针往返；收益是「一次误切 = 换 IP = 上游 prompt cache 全丢 + 一个节点白冻结」。
+   * 这笔账只在一个方向上划算：确认失败才切，确认成功就等。
+   */
+  async function confirm(decision, obs) {
+    const cc = profile.crossCheck;
+    if (!cc || decision.action !== 'switch') return decision;
+
+    const ruleName = String(decision.source).replace(/^rule:/, '');
+    if (cc.onRules && !cc.onRules.includes(ruleName)) return decision;
+
+    let r;
+    try {
+      r = await cc.probe({ cfg, failed: obs });
+    } catch (e) {
+      log.warn(`二次确认探针失败（${e.message}），无法证伪，按原判定继续`);
+      return decision;
+    }
+
+    const passed = cc.isOk ? cc.isOk(r) : r.status === 200;
+    if (!passed) {
+      log.info(`二次确认「${cc.label}」仍然失败（status=${r.status}）→ 问题确实在这个节点，维持换节点`);
+      return decision;
+    }
+
+    log.info(`二次确认「${cc.label}」通过（status=${r.status}）→ 问题不在节点，改判等待，不冻结节点`);
+    return {
+      ...decision,
+      action: 'wait',
+      source: 'crosscheck',
+      confidence: 1,
+      reason: `换条件复探通过（${cc.label}），说明是上游/模型级问题，不是这个节点坏了`,
+    };
+  }
+
   // ---------- 候选节点 ----------
 
   function candidatePool(group) {
@@ -199,8 +243,10 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
     }
 
     log.info(`探针 "${current}" → ${obs.ok ? 'OK' : 'FAIL'}（status=${obs.status}, ${obs.ttfbMs}ms）`);
-    const decision = await decide(obs, { node: current, failures: state.fails[current] || 0 });
+    let decision = await decide(obs, { node: current, failures: state.fails[current] || 0 });
     log.info(`处置：${decision.action}（${decision.source}）— ${decision.reason}`);
+    decision = await confirm(decision, obs);
+    if (decision.source === 'crosscheck') log.info(`处置改判：${decision.action}（${decision.reason}）`);
 
     switch (decision.action) {
       case 'ok': {
@@ -284,7 +330,7 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
     }
   }
 
-  return { runOnce, probeOnce, probeConfirmed, decide, matchRule, pickCandidates, candidatePool };
+  return { runOnce, probeOnce, probeConfirmed, decide, confirm, matchRule, pickCandidates, candidatePool };
 }
 
 module.exports = { createEngine };

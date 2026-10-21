@@ -57,8 +57,16 @@ mihomo 自带的 `fallback` 组只能测出「TCP 通不通」。它测不出这
               置信度 < 阈值？ ──是──▶ 保守处理（重试同一节点，不乱切）
                       │ 否
                       ▼
+              ┌───────────────┐
+              │ 3. 结论是 switch？│──是──▶ 换条件再探一次（crossCheck）
+              └───────┬───────┘         ├─ 通了 ──▶ 改判 wait，节点不冻结
+                      │                 └─ 还不通 ─▶ 照切
+                      ▼
                    执行动作
 ```
+
+第 3 步是后来补的，起因见下面「429 有两副面孔」那节：**换节点是有成本的，
+切之前多问一句，好过切错了再切回来。**
 
 ### 为什么规则必须排第一
 
@@ -254,6 +262,14 @@ module.exports = {
     actions: { switch_node: '这个站是按出口 IP 封的，换节点有用' },
   },
 
+  // 可选：切节点前的二次确认。换一个条件再探一次，能证伪「是节点坏了」就改判 wait
+  crossCheck: {
+    label: '主模型 → 对照组模型',
+    onRules: ['rate-limit'],        // 只对拿不准的规则做，免得每条都多打一次
+    isOk: (r) => r.status === 200,
+    probe: ({ cfg }) => probe({ cfg, model: ALT_MODEL }),
+  },
+
   // 可选：自测用例，命令行 --selftest 会跑
   selftest() {
     return [{ name: '限流', obs: { status: 429, body: '', ttfbMs: 300, ok: false }, expect: 'switch' }];
@@ -312,6 +328,51 @@ module.exports = {
 
 所以对这类站点，`429` 应该映射成 `switch` 而不是 `wait`。
 但如果是**全站**限流，换了也没用。**这条要靠你自己实测确认**，然后写进 profile 的 rules 里。
+
+### 429 有两副面孔，别只看状态码
+
+同一天里，`429` 还教了我第二课。
+
+那次 13 个来自不同国家、不同机房、不同协议的节点，在 13 秒内**全部**返回 429，
+守护按照「429 = IP 限流」的规则，把整池 13 个节点全冻结了。
+
+结果一个节点都没坏。事后逐节点复测，全绿。
+
+真正的原因是正文里那行字：
+
+```json
+{"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}}
+```
+
+`type: server_error` —— 是对面**某个模型的端点挂了**，跟我们的出口 IP 一点关系都没有。
+同一个节点、同一时刻，换个模型就通：
+
+| 模型 | 结果 |
+|---|---|
+| `deepseek-x-flash-free` | 429 ×5 / 200 ×1 |
+| `mimo-x-flash-free` | 200 ×4 |
+
+一个概率上的常识值得记住：**如果一堆互相独立的东西同时坏了，那坏的通常不是它们。**
+
+所以处理上分两层：
+
+1. **规则层**先按正文分型 —— 文案里带 `upstream request failed` / `endpoint is unavailable`
+   的一律 `wait`，不冻结节点。
+2. **profile 层**再加一道 `crossCheck`：真要切节点之前，换一个条件再探一次。
+
+```js
+crossCheck: {
+  label: '主模型 → 对照组模型',
+  onRules: ['rate-limit-per-ip'],   // 只在拿不准的规则上做，别每条都多打一次
+  isOk: (r) => r.status === 200,
+  probe: ({ cfg }) => probe({ cfg, model: ALT_MODEL }),
+},
+```
+
+换了条件就通了 → 问题跟这个节点无关，**这次不切**，改判 `wait`。
+换条件还是不通 → 才是节点的问题，照切不误。
+
+代价是一次额外往返；收益是不拿好节点去殉葬（一次误切 = 换 IP = 上游 prompt cache 全丢）。
 
 ### 健康检查端点往往不做风控，别拿它当探针
 
