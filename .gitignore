@@ -1,0 +1,13 @@
+# secrets — never commit
+config/config.json
+secrets.json
+state/
+*.log
+*.pid
+
+# private site profiles (keep these local)
+profiles/*.js
+!profiles/openai-compatible.example.js
+
+node_modules/
+.DS_Store

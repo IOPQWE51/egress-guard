@@ -1,0 +1,60 @@
+{
+  "_comment": "复制成 config/config.json 再改。密钥不要写这里，放 secrets.json。",
+
+  "profile": "openai-compatible.example",
+
+  "mihomo": {
+    "host": "127.0.0.1",
+    "port": 9095,
+    "group": "proxy-pool",
+    "auth": ""
+  },
+
+  "nodes": {
+    "_comment": "可选。填了则按这个顺序优先；留空则直接用 mihomo 组内的节点顺序。",
+    "priority": []
+  },
+
+  "probe": {
+    "intervalMs": 180000,
+    "timeoutMs": 45000,
+    "retryFastMs": 3000
+  },
+
+  "schedule": {
+    "cooldownBaseMs": 1200000,
+    "cooldownMaxMs": 43200000,
+    "allDeadMs": 600000,
+    "quietMs": 600000,
+    "switchDebounceMs": 60000,
+    "rehabIntervalMs": 1800000,
+    "maxCandidates": 3
+  },
+
+  "classifier": {
+    "_comment": "可选。填了 url/model/apiKey 才会生效（apiKey 建议放 secrets.json）。",
+    "enabled": false,
+    "url": "http://127.0.0.1:20128/v1/systemone",
+    "model": "codiv/openjev-latest",
+    "timeoutMs": 8000,
+    "minConfidence": 0.65
+  },
+
+  "notify": {
+    "_comment": "飞书自定义机器人。webhook 建议放 secrets.json。",
+    "enabled": false,
+    "webhook": "",
+    "keyword": "[egress-guard]"
+  },
+
+  "logwatch": {
+    "_comment": "可选。填了容器名就会 tail 它的日志，命中 profile.logPatterns 立刻触发检查。",
+    "enabled": false,
+    "dockerSocket": "/var/run/docker.sock",
+    "container": ""
+  },
+
+  "fallbackAction": "switch",
+
+  "stateFile": "state/state.json"
+}

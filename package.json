@@ -1,0 +1,18 @@
+{
+  "name": "egress-guard",
+  "version": "0.1.0",
+  "description": "Watch an LLM gateway's upstream failures, decide whether the egress node is at fault, and rotate a mihomo proxy group accordingly.",
+  "type": "commonjs",
+  "main": "src/cli.js",
+  "bin": { "egress-guard": "src/cli.js" },
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node src/cli.js --loop",
+    "once": "node src/cli.js --once",
+    "selftest": "node src/cli.js --selftest",
+    "status": "node src/cli.js --status"
+  },
+  "keywords": ["mihomo", "clash", "proxy", "failover", "llm-gateway", "ops"],
+  "license": "MIT",
+  "dependencies": {}
+}

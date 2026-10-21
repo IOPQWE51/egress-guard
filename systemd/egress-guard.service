@@ -1,0 +1,29 @@
+[Unit]
+Description=egress-guard — proxy node guardian for LLM gateway
+Documentation=https://github.com/IOPQWE51/egress-guard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 改成你自己的用户和路径
+User=nobody
+WorkingDirectory=/opt/egress-guard
+ExecStart=/usr/bin/node /opt/egress-guard/src/cli.js --loop
+
+Restart=always
+RestartSec=5
+
+# 日志交给 systemd，用 journalctl -u egress-guard -f 看
+StandardOutput=journal
+StandardError=journal
+
+# 加固（按需放宽）
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/egress-guard/state
+
+[Install]
+WantedBy=multi-user.target
