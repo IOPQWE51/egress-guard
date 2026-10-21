@@ -44,6 +44,7 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
     const obs = {
       status: r.status ?? 0,
       body: r.body || '',
+      headers: r.headers || {},
       ttfbMs: r.ttfbMs ?? Date.now() - started,
       detail: r.detail || '',
     };
@@ -102,11 +103,20 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
 
     const rule = matchRule(obs);
     if (rule) {
+      // 规则可以自己指定冷却时长。有确定依据的时候（比如 429 带了 Retry-After），
+      // 按它来；没有就交给 store 的指数退避。
+      let cooldownMs = 0;
+      try {
+        cooldownMs = typeof rule.cooldownMs === 'function' ? rule.cooldownMs(obs) : Number(rule.cooldownMs) || 0;
+      } catch (e) {
+        log.warn(`规则 ${rule.name} 的 cooldownMs 抛错：${e.message}`);
+      }
       return {
         action: rule.action,
         source: `rule:${rule.name}`,
         confidence: 1,
         reason: rule.reason || rule.name,
+        cooldownMs: cooldownMs > 0 ? cooldownMs : 0,
       };
     }
 
@@ -444,7 +454,7 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
           return { action: 'debounced', current, obs, decision };
         }
 
-        store.fail(state, current);
+        store.fail(state, current, decision.cooldownMs);
         const candidates = pickCandidates(state, group, [current]);
         if (!candidates.length) {
           state.allDeadUntil = Date.now() + S.allDeadMs;

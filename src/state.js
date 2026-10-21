@@ -37,11 +37,17 @@ function createStore(cfg, log, opts = {}) {
     fs.writeFileSync(file, JSON.stringify(s, null, 2));
   }
 
-  function fail(state, node) {
+  /**
+   * 记一次失败。
+   * overrideMs 有值时用它的时长（比如 429 带了 Retry-After，那是上游直接告诉我们的
+   * 真实恢复时间，比指数退避瞎猜准），但同样受 cooldownMaxMs 封顶。
+   */
+  function fail(state, node, overrideMs = 0) {
     const n = (state.fails[node] = (state.fails[node] || 0) + 1);
-    const wait = Math.min(cfg.schedule.cooldownBaseMs * Math.pow(2, n - 1), cfg.schedule.cooldownMaxMs);
+    const backoff = Math.min(cfg.schedule.cooldownBaseMs * Math.pow(2, n - 1), cfg.schedule.cooldownMaxMs);
+    const wait = overrideMs > 0 ? Math.min(overrideMs, cfg.schedule.cooldownMaxMs) : backoff;
     state.cooldown[node] = Date.now() + wait;
-    log.info(`节点 "${node}" 第 ${n} 次失败，冷却 ${fmt(wait)}`);
+    log.info(`节点 "${node}" 第 ${n} 次失败，冷却 ${fmt(wait)}${overrideMs > 0 ? '（按上游 Retry-After）' : ''}`);
     return wait;
   }
 

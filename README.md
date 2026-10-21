@@ -436,6 +436,34 @@ crossCheck: {
 
 代价是一次额外往返；收益是不拿好节点去殉葬（一次误切 = 换 IP = 上游 prompt cache 全丢）。
 
+### 429 带了 `Retry-After` 就照着它来，别自己瞎猜
+
+免费额度真的用光时，有些站点会诚实地告诉你什么时候恢复：
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 37791        ← 10 个半小时
+{"type":"error","error":{"type":"FreeUsageLimitError","message":"Rate limit exceeded."}}
+```
+
+这比指数退避准得多。引擎里可以让规则直接给出冷却时长：
+
+```js
+{
+  name: 'free-quota-exhausted',
+  when: (o) => o.status === 429 && /FreeUsageLimitError/i.test(o.body),
+  action: 'switch',
+  cooldownMs: (o) => Number((o.headers || {})['retry-after']) * 1000 || 0,
+  reason: '这个出口 IP 的额度用光了，Retry-After 说了什么时候恢复',
+}
+```
+
+`cooldownMs` 返回 0 就退回指数退避；返回正数就按它冷却（仍受 `cooldownMaxMs` 封顶）。
+
+为什么重要：不读这个，守护会按 20min → 40min → 80min 的节奏反复回去撞一个
+明明要 10 小时才恢复的 IP，每撞一次失败一次、退避翻倍、还发一条通知 —— 纯噪音。
+**上游已经告诉你答案了，就别自己数着秒表猜。**
+
 ### 健康检查端点往往不做风控，别拿它当探针
 
 有些服务的 `/v1/models` 这类元数据端点永远返回 200，即使聊天接口已经把你封了。
