@@ -35,6 +35,7 @@ const DEFAULTS = {
     switchDebounceMs: 60000,  // 两次切换最小间隔
     rehabIntervalMs: 1800000, // 冷却中的节点多久康复探测一次
     maxCandidates: 3,
+    variantEscalateAfter: 3,  // 连续几轮「全局失败」后，开始试备选变体（换模型/换路径/换账号）
   },
   classifier: {
     enabled: false,

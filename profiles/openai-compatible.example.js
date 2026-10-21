@@ -119,6 +119,21 @@ module.exports = {
   //   probe: ({ cfg }) => probe({ cfg, model: 'some-other-free-model' }),
   // },
 
+  /*
+   * 可选：备选条件（换模型 / 换路径 / 换账号 / 换版本）。
+   *
+   * 主条件连续 `variantEscalateAfter` 轮全局失败后，引擎会挨个试这里的备选：
+   *   通了   → 改用备选继续监视，并推送「主用挂了，建议客户端临时切过去」
+   *   都不通 → 真·全局故障，安静等
+   *   恢复   → 自动切回主条件，也推送一声
+   *
+   * 引擎不会替你改客户端配置 —— 只负责发现和报告。
+   */
+  // primaryLabel: '主接口',
+  // variants: [
+  //   { id: 'v2', label: '另一个模型', probe: ({ cfg }) => probe({ cfg, model: 'some-other-free-model' }) },
+  // ],
+
   logPatterns: ['ERROR 429', 'ERROR 403', 'rate limit'],
 
   selftest() {

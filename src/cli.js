@@ -86,7 +86,12 @@ function build() {
   const cfg = load();
   const profileName = argOf('--profile') || cfg.profile || 'openai-compatible.example';
   const { module: profile } = loadProfile(profileName);
-  if (profile.group && !argOf('--group')) cfg.mihomo.group = profile.group;
+  // --group 显式指定时用指定的；否则用 profile 声明的组名；都没有就落回配置里的值。
+  // 旧写法是 `if (profile.group && !argOf('--group'))` —— 传了 --group 反而两边都不生效，
+  // 参数被静默丢弃，留着配置里的默认值。这个 bug 藏得挺好：不传参时一切正常。
+  const groupOverride = argOf('--group');
+  if (groupOverride) cfg.mihomo.group = groupOverride;
+  else if (profile.group) cfg.mihomo.group = profile.group;
 
   const mihomo = createMihomo(cfg, logger);
   const store = createStore(cfg, logger, { readOnly: has('--dry-run') });
@@ -154,6 +159,13 @@ async function main() {
             classifier: classifier.enabled ? cfg.classifier.model : 'off',
             notify: cfg.notify.enabled ? 'on' : 'off',
             logWatch: cfg.logwatch.enabled ? cfg.logwatch.container : 'off',
+            variantEscalateAfter: cfg.schedule.variantEscalateAfter,
+          },
+          condition: {
+            current: engine.variantLabel(state.variant || null),
+            id: state.variant || null,
+            since: state.variantSince || 0,
+            globalFails: state.globalFails || 0,
           },
           cooldown: state.cooldown || {},
           fails: state.fails || {},

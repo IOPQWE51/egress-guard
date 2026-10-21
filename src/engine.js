@@ -36,21 +36,32 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
 
   // ---------- 探针 ----------
 
-  async function probeOnce() {
+  // 当前生效的探针。默认是 profile.probe（主条件）；主条件连续全局失败时，
+  // 会被换成备选条件（见下面的变体一节）。
+  let activeProbe = profile.probe;
+
+  function toObs(r, started) {
+    const obs = {
+      status: r.status ?? 0,
+      body: r.body || '',
+      ttfbMs: r.ttfbMs ?? Date.now() - started,
+      detail: r.detail || '',
+    };
+    obs.ok = profile.isOk ? profile.isOk(obs) : obs.status === 200;
+    return obs;
+  }
+
+  async function probeWith(fn) {
     const started = Date.now();
     try {
-      const r = await profile.probe({ cfg });
-      const obs = {
-        status: r.status ?? 0,
-        body: r.body || '',
-        ttfbMs: r.ttfbMs ?? Date.now() - started,
-        detail: r.detail || '',
-      };
-      obs.ok = profile.isOk ? profile.isOk(obs) : obs.status === 200;
-      return obs;
+      return toObs(await fn({ cfg }), started);
     } catch (e) {
       return { status: 0, body: '', ttfbMs: Date.now() - started, detail: e.message, ok: false };
     }
+  }
+
+  async function probeOnce() {
+    return probeWith(activeProbe);
   }
 
   /**
@@ -58,10 +69,15 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
    * 慢失败不复测 —— 已经等了 15s+，再测一次等于双倍排队。
    */
   async function probeConfirmed(label) {
-    let obs = await probeOnce();
-    if (obs.ok || obs.ttfbMs >= cfg.probe.retryFastMs) return obs;
+    const obs = await probeOnce();
 
-    log.warn(`探针 ${label} 极快失败（${obs.ttfbMs}ms，status=${obs.status}），1.5s 后复测`);
+    // 只有「连 HTTP 状态行都没收到」并且很快返回的，才算传输层抖动，值得复测。
+    // 已经拿到真实状态码（哪怕是 429 / 403）就是确定答案 —— 复测只白白多等 1.5 秒，
+    // 而且故障期间每个节点都要多打一次请求，越乱越慢，正好卡在最不该慢的时候。
+    const transportBlip = obs.status === 0 && obs.ttfbMs < cfg.probe.retryFastMs;
+    if (obs.ok || !transportBlip) return obs;
+
+    log.warn(`探针 ${label} 连状态行都没收到（${obs.ttfbMs}ms），疑似传输抖动，1.5s 后复测`);
     await sleep(1500);
     const again = await probeOnce();
     log.info(`复测 ${label} → ${again.ok ? 'OK' : 'FAIL'}（${again.ttfbMs}ms，status=${again.status}）`);
@@ -167,6 +183,108 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
     };
   }
 
+  // ---------- 变体：换个条件再试 ----------
+
+  /**
+   * 「变体」= 请求的条件维度：用哪个模型、走哪条路径、用哪个账号、走哪个版本。
+   *
+   * 节点维度解决不了的问题，换个条件往往就通了。2026-10-21 那次就是：
+   * 13 个不同国家、不同机房的节点在同一分钟内全部 429，根子是「某个模型的端点挂了」，
+   * 换节点纯属白费 —— 那时候只能干等，等多久也不知道。
+   *
+   * 现在：连续 N 轮「全局失败」之后，挨个试备选条件。
+   *
+   *   换了条件就通   → 守护改用新条件继续盯，同时告诉人「主用挂了，建议临时切到备选」
+   *   换了条件也不通 → 那才是真·全局故障，安静等，不刷屏
+   *   主用恢复了     → 自动切回来，也告诉人一声
+   *
+   * 有一条线要划清楚：**守护只负责发现和报告，不替人改客户端的配置。**
+   * 如果守护自己偷偷换条件探通了、而业务还在用挂掉的那个，
+   * 就会造出「探针是绿的、业务还是红的」这种假象 —— 比不监控更糟。
+   */
+
+  const alts = () =>
+    Array.isArray(profile.variants)
+      ? profile.variants.filter((v) => v && v.id && typeof v.probe === 'function')
+      : [];
+
+  function variantLabel(id) {
+    if (!id) return profile.primaryLabel || '主用条件';
+    const v = alts().find((x) => x.id === id);
+    return (v && v.label) || id;
+  }
+
+  function applyVariant(state) {
+    const v = alts().find((x) => x.id === state.variant);
+    activeProbe = v ? v.probe : profile.probe;
+    return activeProbe;
+  }
+
+  /**
+   * 全局失败计数 + 可能的降级。只在结论是 wait 的时候调用。
+   */
+  async function onGlobalFail(state, { current, dryRun }) {
+    const list = alts();
+    if (!list.length) return null;
+
+    const threshold = S.variantEscalateAfter || 3;
+    state.globalFails = (state.globalFails || 0) + 1;
+
+    if (state.globalFails < threshold) {
+      log.info(`全局失败连续 ${state.globalFails}/${threshold} 轮（当前条件：${variantLabel(state.variant)}）`);
+      return null;
+    }
+    state.globalFails = 0;
+
+    // ① 还在主条件上：挨个试备选
+    if (!state.variant) {
+      for (const v of list) {
+        const r = await probeWith(v.probe);
+        log.info(`备选条件「${variantLabel(v.id)}」→ ${r.ok ? 'OK' : 'FAIL'}（status=${r.status}, ${r.ttfbMs}ms）`);
+        if (!r.ok) continue;
+        state.variant = v.id;
+        state.variantSince = Date.now();
+        store.save(state);
+        applyVariant(state);
+        log.warn(`主用条件连续失败，改用备选「${variantLabel(v.id)}」继续监视（节点没换）`);
+        await notifier.send(
+          `🔀 主用条件挂了，备选正常\n` +
+            `条件：${variantLabel(null)} → ${variantLabel(v.id)}\n` +
+            `节点：${current}（同一个节点，没换）\n` +
+            `说明：换节点无用，是上游/条件级问题。守护已改用备选继续盯着。\n` +
+            `建议：客户端也临时切到「${variantLabel(v.id)}」。`,
+          { dryRun }
+        );
+        return { action: 'variant-switched', variant: v.id };
+      }
+      log.error(`主用条件和 ${list.length} 个备选条件全都不通 —— 这是真·全局故障，只能等`);
+      return null;
+    }
+
+    // ② 当前在备选上：回头看主条件恢复没有
+    const prim = await probeWith(profile.probe);
+    if (!prim.ok) {
+      log.info(`主用条件仍未恢复（status=${prim.status}），继续用备选「${variantLabel(state.variant)}」`);
+      return null;
+    }
+    return await backToPrimary(state, { current, dryRun, why: '全局失败复查时发现主用已恢复' });
+  }
+
+  async function backToPrimary(state, { current, dryRun, why }) {
+    const from = variantLabel(state.variant);
+    state.variant = null;
+    state.variantSince = 0;
+    state.globalFails = 0;
+    store.save(state);
+    applyVariant(state);
+    log.info(`主用条件恢复（${why}），从「${from}」切回「${variantLabel(null)}」`);
+    await notifier.send(
+      `✅ 主用条件恢复\n条件：${from} → ${variantLabel(null)}\n节点：${current}\n建议：客户端可以切回来了。`,
+      { dryRun }
+    );
+    return { action: 'variant-recovered' };
+  }
+
   // ---------- 候选节点 ----------
 
   function candidatePool(group) {
@@ -222,6 +340,7 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
 
   async function runOnce({ dryRun = false, simulateFailure = false } = {}) {
     const state = store.load();
+    applyVariant(state);
 
     if (state.allDeadUntil > Date.now()) {
       log.info(`全挂静默中，跳过（剩余 ${Math.round((state.allDeadUntil - Date.now()) / 1000)}s）`);
@@ -267,7 +386,22 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
     switch (decision.action) {
       case 'ok': {
         store.succeed(state, current);
+        state.globalFails = 0;
         store.save(state);
+
+        // 正跑在备选条件上：隔一段时间回头试试主条件，通了就切回去
+        if (state.variant && Date.now() - (state.variantSince || 0) > S.rehabIntervalMs) {
+          const prim = await probeWith(profile.probe);
+          if (prim.ok) {
+            const r = await backToPrimary(state, { current, dryRun, why: '定时复查' });
+            await rehabSweep(state, group);
+            return { action: 'ok', current, obs, decision, ...r };
+          }
+          state.variantSince = Date.now();
+          store.save(state);
+          log.info(`主用条件仍未恢复（status=${prim.status}），继续用备选，${Math.round(S.rehabIntervalMs / 60000)} 分钟后再试`);
+        }
+
         await rehabSweep(state, group);
         return { action: 'ok', current, obs, decision };
       }
@@ -287,9 +421,14 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
       case 'retry': {
         const backoff = decision.action === 'wait' ? S.quietMs : 60000;
         state.quietUntil = Date.now() + backoff;
+
+        // 「换条件」只对全局性失败有意义；单次抖动（retry）不动这个计数
+        let extra = null;
+        if (decision.action === 'wait') extra = await onGlobalFail(state, { current, dryRun });
+
         store.save(state);
         log.info(`${decision.action === 'wait' ? '全局问题，等待' : '疑似抖动，稍后重试'} ${Math.round(backoff / 60000)} 分钟`);
-        return { action: decision.action, current, obs, decision };
+        return { action: decision.action, current, obs, decision, ...(extra || {}) };
       }
 
       case 'switch':
@@ -346,7 +485,10 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
     }
   }
 
-  return { runOnce, probeOnce, probeConfirmed, decide, confirm, matchRule, pickCandidates, candidatePool };
+  return {
+    runOnce, probeOnce, probeConfirmed, decide, confirm, matchRule, pickCandidates, candidatePool,
+    variantLabel, activeVariant: (state) => state.variant || null,
+  };
 }
 
 module.exports = { createEngine };
