@@ -35,7 +35,8 @@ const DEFAULTS = {
     switchDebounceMs: 60000,  // 两次切换最小间隔
     rehabIntervalMs: 1800000, // 冷却中的节点多久康复探测一次
     maxCandidates: 3,
-    variantEscalateAfter: 3,  // 连续几轮「全局失败」后，开始试备选变体（换模型/换路径/换账号）
+    variantEscalateAfter: 3,
+    minNodes: 3,        // 组内节点数低于这个值才报「订阅可能失效」（自有机房池可以调小）  // 连续几轮「全局失败」后，开始试备选变体（换模型/换路径/换账号）
 
     // 额度轮换：很多免费额度是「按出口 IP 每天一份」。一直挂着同一个节点，
     // 那一个 IP 会吃掉一整天的量然后撞 429，而组里其它 IP 的额度一天都没动过。

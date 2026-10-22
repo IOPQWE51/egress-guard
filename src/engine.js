@@ -551,8 +551,11 @@ function createEngine({ cfg, profile, log, mihomo, store, classifier, notifier }
     if (missing.length) {
       log.warn(`优先级表里 ${missing.length} 个节点已不在组内（改名/下架）：${missing.join(', ')}`);
     }
-    if (group.all.length < 3) {
-      log.error(`组内只剩 ${group.all.length} 个节点，订阅可能失效或 filter 写错`);
+    // 阈值可配：机场池这种几十个节点的地方才需要「掉到 3 个以下就报警」，
+    // 自有机房池本来就只有两三个出口，照 3 报会天天误报。
+    const minNodes = cfg.schedule?.minNodes ?? 3;
+    if (group.all.length < minNodes) {
+      log.error(`组内只剩 ${group.all.length} 个节点（阈值 ${minNodes}），可能是订阅失效、filter 写错，或真的挂了`);
       // 同「全挂」：这种状态会一直维持，报一次就够，恢复了再说
       if (!state.groupSickNotified) {
         state.groupSickNotified = true;
